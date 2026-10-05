@@ -14,6 +14,7 @@ Unlike Facebook Marketplace or Gumtree, UniExchange is closed to the public: onl
 - [Getting Started](#getting-started)
 - [Running in VS Code](#running-in-vs-code)
 - [Configuration Reference](#configuration-reference)
+- [Deployment (Azure + Vercel)](#deployment-azure--vercel)
 - [Email / OTP Delivery](#email--otp-delivery)
 - [Payments (PayFast)](#payments-payfast)
 - [Backend](#backend)
@@ -414,45 +415,7 @@ start once so Hibernate creates the tables, then **delete that setting** and res
 
 ### Deploying (Azure App Service + Vercel)
 
-**Backend: Azure App Service (Linux, Java SE)**
-
-1. Create an **Azure Database for MySQL - Flexible Server** and a database named
-   `uniexchange`. Allow access from Azure services (Networking tab).
-2. Create a **Linux** Web App with the **Java SE** runtime. Pick the Java 25
-   stack to match `pom.xml`. If the portal does not offer 25 yet, lower
-   `java.version` in `pom.xml` to the newest LTS it does offer.
-3. Build with `./mvnw -B package` and deploy `target/uniexchange-0.0.1-SNAPSHOT.jar`
-   (for example `az webapp deploy --type jar --src-path target/uniexchange-0.0.1-SNAPSHOT.jar ...`).
-4. Set these **Application settings** (never in a committed file):
-
-| Setting | Value |
-|---|---|
-| `SPRING_PROFILES_ACTIVE` | `prod` |
-| `DB_HOST` | `<server>.mysql.database.azure.com` |
-| `DB_NAME` / `DB_USERNAME` / `DB_PASSWORD` | your database and admin login |
-| `JWT_SECRET` | 32+ random bytes, e.g. `openssl rand -base64 48` |
-| `CORS_ALLOWED_ORIGINS` | `https://<frontend>.vercel.app` (plus any custom domain) |
-| `FRONTEND_URL` | `https://<frontend>.vercel.app` (no trailing slash) |
-| `BACKEND_URL` | `https://<backend>.azurewebsites.net` (no trailing slash) |
-| `SPRING_MAIL_HOST`, `SPRING_MAIL_PORT`, `SPRING_MAIL_USERNAME`, `SPRING_MAIL_PASSWORD`, `SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH=true`, `SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE=true`, `APP_OTP_FROM` | SMTP. Without `SPRING_MAIL_HOST` OTPs only go to the log and nobody can sign up |
-| `PAYFAST_MERCHANT_ID` / `PAYFAST_MERCHANT_KEY` / `PAYFAST_PASSPHRASE` | see "Going live" below |
-
-`DB_HOST`, `FRONTEND_URL` and `BACKEND_URL` have no defaults in the prod profile on
-purpose: if one is missing, startup fails instead of quietly using localhost.
-Uploads and chat media are written under `/home/data`, which survives deploys and
-restarts (override with `UPLOADS_DIR` / `CHAT_MEDIA_DIR`). Keep the app at **one
-instance**: rate limits and files are local to it.
-
-**Frontend: Vercel**
-
-1. Import the repo and set **Root Directory** to `Frontend`. `Frontend/vercel.json`
-   sets the build, the SPA fallback (so refreshing `/wallet` does not 404) and
-   security headers.
-2. Environment variables (they are baked in at **build** time, so redeploy after
-   changing them):
-   - `VITE_API_BASE_URL=https://<backend>.azurewebsites.net`
-   - `VITE_SITE_URL=https://<frontend>.vercel.app`
-   - `VITE_STUDENT_EMAIL_PATTERN` (optional, defaults to the student pattern)
+See [Deployment (Azure + Vercel)](#deployment-azure--vercel) for the full step-by-step guide, the current deployment and how to test it.
 
 ### SQL injection
 
@@ -469,6 +432,537 @@ it that way — never concatenate request values into a query string.
 | `VITE_API_BASE_URL` | `http://localhost:8080` | Where the API lives |
 | `VITE_STUDENT_EMAIL_PATTERN` | `^\d{8,10}@mycput\.ac\.za$` | Mirrors the backend rule, for instant form feedback |
 | `VITE_SITE_URL` | *(empty: the serving origin)* | Public origin for canonical URLs, `og:image`, and the build-time `sitemap.xml` / `robots.txt` / `llms.txt`. **Set it for production builds** |
+
+## Deployment (Azure + Vercel)
+
+The backend runs on **Azure App Service**, the database on **Azure Database for
+MySQL**, and the frontend on **Vercel**. Everything fits in the free tiers of an
+**Azure for Students** subscription and **Vercel Hobby**. No code changes are needed
+to deploy: the `prod` profile and `Frontend/vercel.json` already handle it, and
+everything else is environment variables.
+
+This is the full walkthrough, in the order it has to happen. Each part depends on
+the one before it.
+
+### The current deployment
+
+| | |
+|---|---|
+| Frontend (Vercel, on Josh's account, deploys from `JoshBlack25/UniExchange` `main`) | https://uniexchange-rust.vercel.app |
+| Backend (App Service `uniexchange-api`, plan `uniexchange-plan`, **F1 Free**, Linux, Java 25) | https://uniexchange-api-erbwhnbeg4fpdydv.southafricanorth-01.azurewebsites.net |
+| Database (MySQL Flexible Server `uniexchange-db`, **B1ms**, MySQL 8.4) | `uniexchange-db.mysql.database.azure.com`, database `uniexchange`, admin `uniadmin` |
+| Resource group / region | `uniexchange-rg` / South Africa North |
+
+Passwords and secrets are only in Azure's App Settings, never in this file.
+
+### Staying free
+
+- **Azure for Students has no credit card attached.** Anything that costs money
+  comes out of the $100 credit, and when that runs out Azure stops the services.
+  It cannot bill you. Still, pick the free settings below so the credit is not
+  used up.
+- **App Service: Free F1.** 60 CPU-minutes a day and 1 GB RAM. There is no
+  "Always On", so the app sleeps after about 20 idle minutes and **the first
+  request afterwards takes 30–60 seconds** while Spring Boot starts. The chat page
+  polls every 3 seconds, so heavy use can use up the daily CPU quota, and Azure
+  then stops the app until the next day.
+- **MySQL: Burstable B1ms, 20 GB, no HA, no geo backup.** Free for 12 months on
+  Azure for Students. Any other size bills the credit.
+- **Never enable Application Insights.** It is billed separately.
+- Optional safety net: **Cost Management → Budgets → Add**, amount $1, with an
+  email alert.
+- **Vercel Hobby** is free.
+
+### Part 0 — Account and tools (once per machine)
+
+1. **Azure for Students account.** Go to https://azure.microsoft.com/free/students
+   → **Start free** → sign in with your `@mycput.ac.za` address and CPUT password
+   (it is already a Microsoft account). Verify you are a student if asked (the code
+   goes to your mycput inbox; check Junk). In the portal, **Subscriptions** should
+   list **Azure for Students** as **Active**.
+2. **Azure CLI:**
+   ```bash
+   brew install azure-cli
+   az login          # browser opens; sign in with the mycput account
+   ```
+   When it lists tenants and subscriptions, press **Enter** to keep the default
+   (*Cape Peninsula University of Technology* / *Azure for Students*). Check it:
+   ```bash
+   az account show --output table      # Name should be "Azure for Students"
+   ```
+3. **MySQL client on your `PATH`.** The macOS installer does not add it:
+   ```bash
+   echo 'export PATH="/usr/local/mysql/bin:$PATH"' >> ~/.zshrc
+   source ~/.zshrc
+   mysql --version
+   ```
+4. **JDK 25 or newer** to build the jar (see [Prerequisites](#prerequisites)).
+5. **Region:** use one region for everything. We use **South Africa North**. If
+   your subscription does not allow it, the create screen says so; try North Europe.
+
+### Part 1 — Create the MySQL database
+
+1. Portal → search **Azure Database for MySQL flexible servers** → **+ Create** →
+   **Advanced create** if asked.
+2. **Basics:**
+   - Resource group: **Create new** → `uniexchange-rg`
+   - Server name: `uniexchange-db`
+   - Region: South Africa North
+   - MySQL version: 8.0 or 8.4
+   - Workload type: **For development or hobby projects**
+   - **Configure server:** Burstable, **Standard_B1ms**, storage **20 GiB**,
+     Pre-provisioned IOPS, auto-growth **off**, high availability **off**,
+     geo-redundant backup **off**. Tick a *free offer* box if one is shown.
+   - Authentication: **MySQL authentication only**, admin `uniadmin` and a strong
+     password. Avoid `@ # % & $`; they cause trouble in the shell.
+3. **Networking:**
+   - **Public access**
+   - Tick **Allow public access from any Azure service within Azure to this server**
+     (this lets App Service connect)
+   - Click **+ Add current client IP address** (this lets your Mac connect)
+4. **Review + create.** Check the cost shows as free, then **Create**. It takes 5–15 minutes.
+5. Check the settings from the terminal:
+   ```bash
+   az mysql flexible-server show -g uniexchange-rg -n uniexchange-db \
+     --query "{state:state, sku:sku.name, tier:sku.tier, storageGB:storage.storageSizeGb, ha:highAvailability.mode}" -o table
+   ```
+   This should show `Ready`, `Standard_B1ms`, `Burstable`, `20` and `Disabled`.
+6. Create the database:
+   ```bash
+   mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED
+   ```
+   ```sql
+   CREATE DATABASE uniexchange CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   SHOW DATABASES;
+   EXIT;
+   ```
+
+If `mysql` hangs and times out, your internet IP has changed since the firewall
+rule was made (mobile data, a different Wi-Fi). Go to **server → Networking → +
+Add current client IP address → Save**.
+
+### Part 2 — Create the App Service
+
+1. Portal → **App Services** → **+ Create → Web App**.
+2. **Basics:**
+   - Resource group: `uniexchange-rg` (the existing one)
+   - Name: `uniexchange-api`
+   - Publish: **Code**
+   - Runtime stack: **Java 25**
+   - Java web server stack: **Java SE (Embedded Web Server)**. Not Tomcat or
+     JBoss: the jar has its own server.
+   - Operating system: **Linux**
+   - Region: same as the database
+   - Linux plan: **Create new** → `uniexchange-plan`; pricing plan **Free F1**.
+     Click **Explore pricing plans** if only paid plans are shown.
+3. **Database tab:** leave unticked. **Deployment:** continuous deployment
+   **disabled**. **Monitoring:** Application Insights **No**.
+4. **Review + create.** It must say **Free F1**. Then **Create**.
+5. **Check the runtime was saved.** Ours came out empty the first time:
+   ```bash
+   az webapp config show -g uniexchange-rg -n uniexchange-api --query linuxFxVersion -o tsv
+   # must print JAVA|25-java25. If it is empty:
+   az webapp config set -g uniexchange-rg -n uniexchange-api --linux-fx-version "JAVA|25-java25"
+   ```
+6. Get the backend URL. With "secure unique default hostname" on, it contains a
+   random part, so always copy it rather than guess it:
+   ```bash
+   az webapp show -g uniexchange-rg -n uniexchange-api --query defaultHostName -o tsv
+   ```
+   `BACKEND_URL` is `https://` + that, with no trailing slash.
+
+To see which Java versions Azure offers: `az webapp list-runtimes --os-type linux -o tsv | grep -i java`.
+
+### Part 3 — Deploy the frontend to Vercel
+
+Whoever owns the GitHub repo does this. Vercel deploys from `JoshBlack25/UniExchange`.
+
+1. https://vercel.com/signup → **Hobby** → **Continue with GitHub**.
+2. **Add New… → Project** → **Import** `JoshBlack25/UniExchange`. If it is not
+   listed, use **Adjust GitHub App Permissions** to give Vercel access.
+3. **Root Directory: `Frontend`.** This is the most important setting. Framework
+   preset: Vite. Leave the build settings alone; `Frontend/vercel.json` sets them.
+4. **Environment variables** (no trailing slash, no spaces):
+
+   | Key | Value |
+   |---|---|
+   | `VITE_API_BASE_URL` | the `BACKEND_URL` from Part 2 |
+   | `VITE_SITE_URL` | `https://<project-name>.vercel.app` |
+
+5. **Deploy**, then copy the domain from **Domains**. That is `FRONTEND_URL`.
+6. If the real domain differs from `VITE_SITE_URL`: go to **Settings →
+   Environment Variables**, fix it, then **Deployments → ⋯ → Redeploy**. Vite reads
+   these at **build** time, so changes need a redeploy.
+
+Check the build picked up the backend URL: the page's Content-Security-Policy
+`connect-src` should name it.
+```bash
+curl -s https://uniexchange-rust.vercel.app/ | grep -o 'connect-src[^;]*'
+```
+
+After this, every merge to `main` on `JoshBlack25/UniExchange` redeploys the frontend automatically.
+
+### Part 4 — Backend environment variables
+
+App Service → **Settings → Environment variables → App settings**. Set these, then
+click **Apply** in the panel **and** Apply at the bottom of the page, then
+**Confirm**. Saving restarts the app.
+
+| Setting | Value |
+|---|---|
+| `SPRING_PROFILES_ACTIVE` | `prod` |
+| `SERVER_PORT` | `80` (App Service sends Java SE traffic to port 80) |
+| `WEBSITES_CONTAINER_START_TIME_LIMIT` | `600` (F1 is slow to start; the default timeout is 230 s) |
+| `DB_HOST` | `uniexchange-db.mysql.database.azure.com` |
+| `DB_NAME` | `uniexchange` |
+| `DB_USERNAME` | `uniadmin` (just the name, no `@server`) |
+| `DB_PASSWORD` | the MySQL admin **password**, not the username |
+| `JWT_SECRET` | a new secret: `openssl rand -base64 48`. Never reuse the local one |
+| `BACKEND_URL` | from Part 2 |
+| `FRONTEND_URL` | from Part 3 |
+| `CORS_ALLOWED_ORIGINS` | the same as `FRONTEND_URL` |
+| `SPRING_JPA_HIBERNATE_DDL_AUTO` | `update`. **First deploy on an empty database only**; removed in Part 6 |
+| `SPRING_MAIL_HOST` / `SPRING_MAIL_PORT` | `smtp.gmail.com` / `587` |
+| `SPRING_MAIL_USERNAME` / `SPRING_MAIL_PASSWORD` | the Gmail address and its 16-character App Password (see [Email / OTP Delivery](#email--otp-delivery)) |
+| `SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH` | `true` |
+| `SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE` | `true` |
+| `APP_OTP_FROM` | the same Gmail address |
+| `APP_PAYFAST_VALIDATESOURCEIP` | `false`. Read [the PayFast note](#payfast-on-azure-the-source-address-check) first |
+
+Without `SPRING_MAIL_HOST`, sign-up codes only go to the log and nobody can
+register. `DB_HOST`, `FRONTEND_URL` and `BACKEND_URL` have no defaults in the prod
+profile, so if one is missing, startup fails on purpose. PayFast stays on the
+sandbox (no real money) unless the "Going live" settings in
+[Payments](#payments-payfast) are added.
+
+**Setting them from the terminal instead.** This copies the mail settings from your
+untracked `application-local.properties` and generates the JWT secret, so no secret
+is typed or printed. Add `DB_PASSWORD` in the portal afterwards.
+
+```bash
+PROPS=Backend/src/main/resources/application-local.properties
+prop() { grep -E "^[[:space:]]*$1[[:space:]]*=" "$PROPS" | tail -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//'; }
+FRONTEND=https://uniexchange-rust.vercel.app
+BACKEND=https://$(az webapp show -g uniexchange-rg -n uniexchange-api --query defaultHostName -o tsv)
+
+az webapp config appsettings set -g uniexchange-rg -n uniexchange-api -o none --settings \
+  "SPRING_PROFILES_ACTIVE=prod" "SERVER_PORT=80" "WEBSITES_CONTAINER_START_TIME_LIMIT=600" \
+  "DB_HOST=uniexchange-db.mysql.database.azure.com" "DB_NAME=uniexchange" "DB_USERNAME=uniadmin" \
+  "BACKEND_URL=$BACKEND" "FRONTEND_URL=$FRONTEND" "CORS_ALLOWED_ORIGINS=$FRONTEND" \
+  "SPRING_JPA_HIBERNATE_DDL_AUTO=update" \
+  "JWT_SECRET=$(openssl rand -base64 48)" \
+  "SPRING_MAIL_HOST=$(prop spring.mail.host)" "SPRING_MAIL_PORT=$(prop spring.mail.port)" \
+  "SPRING_MAIL_USERNAME=$(prop spring.mail.username)" "SPRING_MAIL_PASSWORD=$(prop spring.mail.password)" \
+  "SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH=true" "SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE=true" \
+  "APP_OTP_FROM=$(prop app.otp.from)" \
+  "APP_PAYFAST_VALIDATESOURCEIP=false"
+```
+
+**Never** copy `app.payfast.tunnel-discovery-url` from `application-local.properties`
+to Azure, and never reuse its `spring.datasource.password` or `app.jwt.secret`.
+
+Check a password works without printing it:
+```bash
+MYSQL_PWD=$(az webapp config appsettings list -g uniexchange-rg -n uniexchange-api \
+  --query "[?name=='DB_PASSWORD'].value | [0]" -o tsv) \
+  mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin --ssl-mode=REQUIRED -e "SELECT 'login ok'"
+```
+
+Turn on logging once, so startup can be watched:
+```bash
+az webapp log config -g uniexchange-rg -n uniexchange-api \
+  --application-logging filesystem --docker-container-logging filesystem --level information
+```
+
+### Part 5 — Build and deploy the backend
+
+```bash
+cd Backend
+./mvnw -B clean package          # runs the H2 test suite; the jar is only built if they pass
+az webapp deploy -g uniexchange-rg -n uniexchange-api \
+  --src-path target/uniexchange-0.0.1-SNAPSHOT.jar --type jar --async true
+```
+
+Always use `--async true`. Without it, F1's deployment service (Kudu) answered
+`502` and nothing was deployed. With it, the output ends in `Site started
+successfully` and `"status": "RuntimeSuccessful"`.
+
+Watch the startup:
+```bash
+az webapp log tail -g uniexchange-rg -n uniexchange-api
+```
+Look for `The following 1 profile is active: "prod"` and `Started UniExchangeApplication`.
+If there is **no** `verification emails will be logged, not sent` warning, SMTP is
+live. The log is also in the portal under **Monitoring → Log stream**.
+
+### Part 6 — Seed reference data and lock the schema
+
+1. Check Hibernate created the tables (29 at the time of writing), then load the
+   5 campuses and 9 categories. Without them, the Create Listing dropdowns are empty:
+   ```bash
+   cd Backend
+   mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED uniexchange \
+     -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='uniexchange';"
+   mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED uniexchange \
+     < src/main/resources/db/seed-reference-data.sql
+   ```
+   The `role` table starts empty. The STUDENT role is created when the first
+   account registers.
+2. **Remove** `SPRING_JPA_HIBERNATE_DDL_AUTO` so production runs with `validate` again:
+   ```bash
+   az webapp config appsettings delete -g uniexchange-rg -n uniexchange-api \
+     --setting-names SPRING_JPA_HIBERNATE_DDL_AUTO
+   ```
+3. Check the log shows a fresh `Started UniExchangeApplication` with no
+   `SchemaManagementException`. A schema mismatch stops startup at that point.
+4. **Never** run the `seed` profile (`DevDataSeeder`) against production. It
+   creates fake accounts whose password is `Password123!`.
+
+Later deploys that add a table or column must create it in Azure **before** the
+deploy, because `validate` will not. See
+[Production profile and schema](#production-profile-and-schema).
+
+### Part 7 — End-to-end check
+
+Give the backend a minute to wake up first.
+
+1. Open the frontend and sign up with `240453182@mycput.ac.za`. That account
+   becomes ADMIN on verification (`app.bootstrap.admins`).
+2. The 6-digit code arrives by email. **Check Junk.**
+3. Create a listing with a photo. The dropdowns should be filled, and the photo
+   should load over `https://`.
+4. Refresh on `/feed` or `/wallet`. It should not 404.
+5. Make a sandbox wallet top-up. The balance should update within a few seconds
+   of returning from PayFast.
+
+### Testing the live deployment
+
+**Never point `./mvnw test` at the live database.** The tests are written for the
+in-memory H2 database in `src/test/resources/application.properties`, and that
+file sets `spring.jpa.hibernate.ddl-auto=create-drop`. Against Azure, Hibernate
+would **drop every table, and all the data in them,** when the tests finish. The
+tests also create and delete their own users, listings and wallets. Run them
+locally before each deploy instead. Part 5's `./mvnw -B clean package` already does.
+
+To test the live site, use checks that only read:
+
+**1. API smoke test.** No login needed:
+```bash
+B=https://uniexchange-api-erbwhnbeg4fpdydv.southafricanorth-01.azurewebsites.net
+curl -s $B/api/categories        # JSON with 9 categories
+curl -s $B/api/campuses          # JSON with 5 campuses
+curl -s $B/api/listings          # JSON array ([] when empty)
+# CORS: must echo the Vercel origin back
+curl -s -D - -o /dev/null -X OPTIONS \
+  -H "Origin: https://uniexchange-rust.vercel.app" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: content-type" \
+  $B/api/auth/login | grep -i access-control-allow-origin
+```
+If a call returns HTML titled **"Microsoft Azure App Service - Welcome"**, the jar
+is **not** deployed. That page also comes back with HTTP 200, so do not trust the
+status code alone.
+
+**2. Read-only database checks:**
+```bash
+mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED uniexchange -e "
+  SELECT (SELECT COUNT(*) FROM user) users, (SELECT COUNT(*) FROM listing) listings,
+         (SELECT COUNT(*) FROM campus) campuses, (SELECT COUNT(*) FROM category) categories;
+  SELECT top_up_id, amount, status, created_at, completed_at
+  FROM wallet_top_up ORDER BY top_up_id DESC LIMIT 5;"
+```
+Only run `SELECT`s against production.
+
+**3. The Part 7 checklist in a browser**, after every deploy.
+
+**4. The logs.** Every PayFast step and every startup problem is logged:
+```bash
+az webapp log tail -g uniexchange-rg -n uniexchange-api
+# or download everything:
+az webapp log download -g uniexchange-rg -n uniexchange-api --log-file logs.zip
+```
+
+To try a risky change against real MySQL, run the app locally against your own
+MySQL (see [Getting Started](#getting-started)), never against Azure.
+
+### PayFast on Azure: the source-address check
+
+The first sandbox top-up on Azure was paid but never credited. The log showed:
+
+```
+PayFast ITN for <id> came from unexpected address 144.126.193.139
+```
+
+The signature check had passed. `144.126.193.139` **is** PayFast's: it is listed
+under `w1w.payfast.co.za`. But `PayFastService.isFromPayFast` looks the PayFast
+hostnames up in DNS when each ITN arrives, and on Azure the result did not
+include it. The exact cause was not confirmed. So production currently runs with
+`APP_PAYFAST_VALIDATESOURCEIP=false`.
+
+That is acceptable on the **sandbox**, because the source check is defence in
+depth only: the signature check and the confirmation call back to PayFast still
+authenticate every ITN. **Before going live with real money:** change the check
+so it does not depend on a live DNS lookup (for example, also accept PayFast's
+published IP ranges from https://developers.payfast.co.za/docs, ITN section),
+deploy that, then delete `APP_PAYFAST_VALIDATESOURCEIP`.
+
+A top-up whose ITN was rejected stays `PENDING` for good. Start a new one.
+
+### Redeploying
+
+#### After editing the code
+
+The frontend redeploys itself. **The backend does not**: someone has to build and
+upload the jar. Always deploy what is on the team repo's `main`, so the live
+frontend and backend come from the same code.
+
+**1. Make and check the change on your own branch** (see [Git Workflow](#git-workflow)):
+```bash
+git checkout <your-branch>
+# ...edit...
+cd Backend && ./mvnw test && cd ..                    # backend tests (H2, never the live DB)
+cd Frontend && npm run build && npm run lint && cd ..  # frontend build and lint
+```
+
+**2. Push your branch and open a pull request** into `main` on
+`JoshBlack25/UniExchange`. Get it reviewed and merged.
+
+**3. Frontend: nothing to do.** Vercel rebuilds and deploys on every merge to
+`main`. Check the project's **Deployments** tab shows the new deployment as
+**Ready**. If the build failed, the red lines in its build log say why, and the
+previous version stays live.
+
+**4. Backend: build and upload from the merged `main`:**
+```bash
+git checkout main
+git pull upstream main     # the team repo. If your "origin" IS the team repo: git pull origin main
+cd Backend
+./mvnw -B clean package    # stops here if a test fails, and nothing is deployed
+az login                   # only if the CLI says your login has expired
+az webapp deploy -g uniexchange-rg -n uniexchange-api \
+  --src-path target/uniexchange-0.0.1-SNAPSHOT.jar --type jar --async true
+```
+Wait for `Site started successfully`. If it reports a `502` instead, run the same
+command again.
+
+**5. Check it.** Watch the log for `Started UniExchangeApplication`:
+```bash
+az webapp log tail -g uniexchange-rg -n uniexchange-api     # Ctrl+C to stop
+```
+Then run the API smoke test from
+[Testing the live deployment](#testing-the-live-deployment) and click through the
+part you changed on the live site.
+
+**If the change adds an entity, a field or a table**, production's `validate`
+refuses to start until the database has it. Do one of these **before** step 4:
+
+- **A SQL script** (preferred). Write the `CREATE TABLE` / `ALTER TABLE ... ADD
+  COLUMN`, commit it under `Backend/src/main/resources/db/`, and run it against Azure:
+  ```bash
+  mysql -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED \
+    uniexchange < Backend/src/main/resources/db/<your-script>.sql
+  ```
+- **Let Hibernate add it once.** Add the App Setting
+  `SPRING_JPA_HIBERNATE_DDL_AUTO=update`, deploy, check the app started, then
+  **delete the setting**. `update` only adds tables and columns. It never renames,
+  changes or drops anything, so a renamed or retyped column still needs a script.
+
+**If both frontend and backend changed** and the frontend calls a new endpoint,
+deploy the backend (step 4) as soon as the PR is merged. Until then, the new
+frontend is live against the old backend.
+
+**Rolling back a bad deploy:**
+- **Backend:** build and deploy the last good commit:
+  ```bash
+  git checkout <good-commit-sha>
+  cd Backend && ./mvnw -B clean package
+  az webapp deploy -g uniexchange-rg -n uniexchange-api \
+    --src-path target/uniexchange-0.0.1-SNAPSHOT.jar --type jar --async true
+  git checkout main
+  ```
+- **Frontend:** Vercel → **Deployments** → the last good one → **⋯ → Promote to Production**.
+
+#### Other changes
+
+| What changed | What to do |
+|---|---|
+| Backend or frontend code | [After editing the code](#after-editing-the-code), above |
+| `VITE_*` variables | Change them in Vercel, then **Redeploy** |
+| Backend settings | Portal → Environment variables, or `az webapp config appsettings set`. The app restarts by itself |
+| Vercel domain | Update `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS` (Azure) and `VITE_SITE_URL` (Vercel, then redeploy) |
+| Backend URL | Update `BACKEND_URL` (Azure) and `VITE_API_BASE_URL` (Vercel, then redeploy) |
+
+### Pausing, checking the credit, and shutting down
+
+**What uses the $100 credit.** With the settings in Parts 1 and 2, nothing should:
+
+| Resource | Plan | Uses credit? |
+|---|---|---|
+| App Service `uniexchange-api` | F1 Free | No. Stopping it saves nothing |
+| MySQL `uniexchange-db` | B1ms, 20 GB | No, for 12 months: Azure for Students includes 750 hours a month of B1ms and 32 GB of storage, and a month has at most 744 hours |
+| Vercel | Hobby | No (not Azure) |
+
+**Check the remaining credit** (billing data lags about 24–48 hours):
+- https://www.microsoftazuresponsorships.com/balance, signed in with the mycput account, or
+- Portal → **Cost Management → Cost analysis**, scope **Azure for Students**. It should show $0.
+
+**Pause.** The live site stops working while paused. The Vercel frontend stays
+up but cannot reach the API.
+```bash
+az webapp stop -g uniexchange-rg -n uniexchange-api
+az mysql flexible-server stop -g uniexchange-rg -n uniexchange-db
+```
+
+**Resume.** Start the database first, then the app, and give it a minute:
+```bash
+az mysql flexible-server start -g uniexchange-rg -n uniexchange-db
+az webapp start -g uniexchange-rg -n uniexchange-api
+```
+
+- Azure **restarts a stopped MySQL server automatically after 30 days**. Stop it
+  again if needed.
+- While MySQL is stopped, compute is not billed, but storage is. 20 GB is inside
+  the free 32 GB, so that is still $0. All data is kept.
+- Pausing is only worth it after the free MySQL year ends. Until then it just
+  takes the site offline.
+
+**Shut down for good.** Do this when the project is finished, and before the free
+MySQL year ends (12 months after the Azure account was created), because after
+that B1ms bills the credit.
+
+1. Back up the database if anything in it should be kept. Profile and listing
+   photos are stored in the database, so they are included. Files under
+   `/uploads` on the App Service are not.
+   ```bash
+   mysqldump -h uniexchange-db.mysql.database.azure.com -u uniadmin -p --ssl-mode=REQUIRED \
+     --single-transaction --set-gtid-purged=OFF uniexchange > uniexchange-backup.sql
+   ```
+2. Delete everything Azure holds for the project. ⚠️ **Permanent**: the
+   database, every account and listing, and the backend are gone, with no undo.
+   ```bash
+   az group delete -n uniexchange-rg
+   ```
+3. Remove or pause the Vercel project (Vercel → project → **Settings**), since it
+   will have no backend to talk to.
+
+### Deployment troubleshooting
+
+These are the problems hit during the first deploy:
+
+| Symptom | Cause and fix |
+|---|---|
+| `linuxFxVersion` is empty after creating the Web App | The runtime was not saved. `az webapp config set … --linux-fx-version "JAVA\|25-java25"` (Part 2) |
+| `az webapp deploy` fails with `Kudu Status: 502` | F1's deployment service timed out. Rerun with `--async true` |
+| API returns HTML "Microsoft Azure App Service - Welcome" | No jar deployed yet, even though the status is 200. Redeploy and check for `RuntimeSuccessful` |
+| `Access denied for user 'uniadmin'` | `DB_PASSWORD` holds the wrong value (the username, for example). Test it with the `MYSQL_PWD=…` command in Part 4 |
+| `mysql` from your Mac times out | Your IP changed. Add it under the database's **Networking** |
+| Startup fails naming `DB_HOST`, `FRONTEND_URL` or `BACKEND_URL` | That setting is missing. The prod profile has no defaults for them, on purpose |
+| Startup fails with `SchemaManagementException` | A table or column is missing. Create it, or add `SPRING_JPA_HIBERNATE_DDL_AUTO=update` once, start, then delete it |
+| CORS error in the browser | `CORS_ALLOWED_ORIGINS` does not exactly match the Vercel URL (`https`, no trailing slash) |
+| "Cannot reach the UniExchange server" | The backend is still waking up (wait a minute), or `VITE_API_BASE_URL` is wrong and needs a redeploy |
+| No sign-up email | Check Junk. If the log says `verification emails will be logged, not sent`, `SPRING_MAIL_HOST` is missing |
+| Wallet paid but not credited | Find `PayFast ITN …` in the log. The warning names the check that failed (see the PayFast note above) |
+| The app stops responding until the next day | F1's 60 CPU-minutes per day are used up. Wait, or move to a paid plan, which uses the student credit |
 
 ## Email / OTP Delivery
 
@@ -989,6 +1483,10 @@ cd Backend
 ```
 
 Tests run against **H2 in-memory** using `src/test/resources/application.properties`, so they need neither a database server nor mail credentials.
+
+> **Never run them against the live Azure database.** The test profile uses
+> `ddl-auto=create-drop`, which drops every table when the tests finish. See
+> [Testing the live deployment](#testing-the-live-deployment) for safe checks.
 
 | Test | Covers |
 |---|---|
